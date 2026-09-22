@@ -1,0 +1,640 @@
+//@version=6
+// Shadow Trades — HTF Structure / Order Blocks / Breakers / FVGs / Dealing Range
+// Fixed higher-timeframe selector. Confirmed-on-close only (non-repainting).
+// All drawings use bar-time coordinates, so HTF objects render correctly on
+// every lower chart timeframe.
+//
+// Logic:
+//   Structure  - swing pivots on the HTF; a break requires an HTF *close*
+//                through the pivot level ("close through high/low"). A break
+//                continuing the existing bias prints MSB (market structure
+//                break); one that flips the bias prints MSS (market structure
+//                shift).
+//   Order block- the last opposite-direction HTF candle preceding the break.
+//   Breaker    - an order block price later closed through, followed by an
+//                opposite market structure break.
+//   FVG        - three-candle HTF imbalance: low[0] > high[2] (bullish) or
+//                high[0] < low[2] (bearish).
+//   Range      - the live HTF dealing range: protected swing on one side,
+//                running extreme on the other, plus equilibrium (50%).
+
+indicator("Shadow Trades", "Shadow Trades", overlay = true,
+     max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
+
+// ═══════════════════════ BASIC SETTINGS ═══════════════════════
+gB = "BASIC SETTINGS"
+
+htfSel = input.string("Chart", "Higher Timeframe (HTF) Structure", group = gB, inline = "tf",
+     options = ["Chart", "30 minutes", "45 minutes", "1 hour", "2 hours", "3 hours", "4 hours",
+                "1 day", "1 week", "1 month", "3 months", "6 months", "12 months"])
+
+// "Chart" follows whatever timeframe the chart is on, so the indicator lands on
+// the right resolution the moment it is applied.
+htfReq = htfSel == "30 minutes" ? "30"  : htfSel == "45 minutes" ? "45"  : htfSel == "1 hour"   ? "60"  :
+         htfSel == "2 hours"    ? "120" : htfSel == "3 hours"    ? "180" : htfSel == "4 hours"  ? "240" :
+         htfSel == "1 day"      ? "D"   : htfSel == "1 week"     ? "W"   : htfSel == "1 month"  ? "M"   :
+         htfSel == "3 months"   ? "3M"  : htfSel == "6 months"   ? "6M"  : htfSel == "12 months" ? "12M" :
+         timeframe.period
+
+// A request for a resolution BELOW the chart's own would pair lookahead_on with
+// an intrabar series, which hands historical bars data that had not printed yet
+// — a silent lookahead bias. Fall back to the chart timeframe and say so.
+bool htfTooLow = timeframe.in_seconds(htfReq) < timeframe.in_seconds(timeframe.period)
+htf = htfTooLow ? timeframe.period : htfReq
+
+hideHist = input.bool(true, "Hide Historical", group = gB, inline = "tf",
+     tooltip = "On: only POIs and structure from the CURRENT dealing range survive — anything from an earlier leg is cleared on each break, and a POI is deleted the moment an HTF candle closes through it.\n\nOff: everything stays — invalidated POIs freeze where price took them out and dim right down.")
+
+showRng = input.bool(true, "Display HTF Dealing Range", group = gB)
+showEQ  = input.bool(true, "Display Range 50% Line", group = gB)
+
+themeSel = input.string("Terminal", "Visual Theme", group = gB,
+     options = ["Terminal", "Classic", "Neon", "Mono"])
+
+labelPOI = input.bool(true, "Label Active POIs", group = gB, inline = "poi")
+poiOff   = input.int(16, "POI Text Offset (bars)", minval = 0, maxval = 400, group = gB, inline = "poi",
+     tooltip = "POIs and the range always run to the right edge. This shifts the POI name, printed inside its box, that many bars past the last candle.")
+
+// ═════════════ HIGHER TIMEFRAME POINTS OF INTEREST ═════════════
+gP = "HIGHER TIMEFRAME POINTS OF INTEREST"
+tipPOI = "Order Blocks — last opposite-direction HTF candle before a structure break.\nBreakers — a failed order block that price closed through, re-tested from the other side.\nFair Value Gaps — three-candle HTF imbalance.\nNone — leave this slot empty."
+
+poi1 = input.string("Order Blocks",     "POI 1:", options = ["Order Blocks", "Breakers", "Fair Value Gaps", "None"], group = gP, inline = "p1", tooltip = tipPOI)
+ext1 = input.bool(true, "Extend", group = gP, inline = "p1",
+     tooltip = "Checked, this POI type runs on to the right edge of the chart. Unchecked, its zones stop at the current bar.")
+poi2 = input.string("Breakers",         "POI 2:", options = ["Order Blocks", "Breakers", "Fair Value Gaps", "None"], group = gP, inline = "p2", tooltip = tipPOI)
+ext2 = input.bool(true, "Extend", group = gP, inline = "p2")
+poi3 = input.string("Fair Value Gaps",  "POI 3:", options = ["Order Blocks", "Breakers", "Fair Value Gaps", "None"], group = gP, inline = "p3", tooltip = tipPOI)
+ext3 = input.bool(true, "Extend", group = gP, inline = "p3")
+
+showOB  = poi1 == "Order Blocks"    or poi2 == "Order Blocks"    or poi3 == "Order Blocks"
+showBR  = poi1 == "Breakers"        or poi2 == "Breakers"        or poi3 == "Breakers"
+showFVG = poi1 == "Fair Value Gaps" or poi2 == "Fair Value Gaps" or poi3 == "Fair Value Gaps"
+
+extOB  = (poi1 == "Order Blocks"    and ext1) or (poi2 == "Order Blocks"    and ext2) or (poi3 == "Order Blocks"    and ext3)
+extBR  = (poi1 == "Breakers"        and ext1) or (poi2 == "Breakers"        and ext2) or (poi3 == "Breakers"        and ext3)
+extFVG = (poi1 == "Fair Value Gaps" and ext1) or (poi2 == "Fair Value Gaps" and ext2) or (poi3 == "Fair Value Gaps" and ext3)
+
+maxLive = input.int(4, "Max POIs per type / side", minval = 1, maxval = 15, group = gP)
+
+// ═══════════════════════ STRUCTURE ═══════════════════════
+gS = "STRUCTURE"
+showMS = input.bool(true, "Show MSS / MSB", group = gS)
+pvLen  = input.int(2, "Swing lookback (HTF bars)", minval = 1, maxval = 10, group = gS,
+     tooltip = "How many HTF bars must sit either side of a candle for it to count as a swing. Higher = fewer, bigger swings.")
+msKeep = input.int(2, "MSS / MSB kept when Hide Historical is on", minval = 1, maxval = 20, group = gS)
+
+// ═══════════════════════ STYLE OPTIONS ═══════════════════════
+gY = "STYLE OPTIONS"
+rngBullC = input.color(#00e5a0, "Bullish HTF Range Lines", group = gY, inline = "s1")
+rngBearC = input.color(#ff3b5c, "Bearish HTF Range Lines", group = gY, inline = "s1")
+obBullC  = input.color(#00e5a0, "Bullish Order Blocks",    group = gY, inline = "s2")
+obBearC  = input.color(#ff3b5c, "Bearish Order Blocks",    group = gY, inline = "s2")
+brBullC  = input.color(#4d9fff, "Bullish Breakers",        group = gY, inline = "s3")
+brBearC  = input.color(#ffb300, "Bearish Breakers",        group = gY, inline = "s3")
+fvBullC  = input.color(#00c08b, "Bullish FVGs",            group = gY, inline = "s4")
+fvBearC  = input.color(#e8455f, "Bearish FVGs",            group = gY, inline = "s4")
+
+lineW    = input.int(1, "Line Thickness (All Lines)", minval = 1, maxval = 5, group = gY, inline = "s5")
+showEmas = input.bool(false, "Display EMAs", group = gY, inline = "s5",
+     tooltip = "Plots the 50 and 200 EMA of the chart timeframe.")
+
+// ═══════ Fixed behaviour — edit here rather than in the settings panel ═══════
+int   rngDim    = 45    // transparency of the dealing-range lines
+bool  useWick   = true  // order block spans the full candle, wick to wick
+int   obLook    = 30    // HTF bars searched back for the order block candle
+int   msLen     = 4     // length of an MSS / MSB marker, in HTF bars
+float fvgMinAtr = 0.0   // minimum gap size in HTF ATR14 multiples (0 = no filter)
+bool  fvgShrink = true  // trim a gap as price fills into it
+bool  fvgByWick = true  // a gap fills on wicks, not closes
+int   regCap    = 300   // POI registry depth; caps the per-bar mitigation scans
+int   emaLenF   = 50    // fast EMA length
+int   emaLenS   = 200   // slow EMA length
+color emaColF   = #ffb300
+color emaColS   = #4d9fff
+
+// ═══════════════════════ Theme ═══════════════════════
+// Zone colours come straight from STYLE OPTIONS; the theme sets the structure
+// accent and how solid every fill is.
+color pBull   = obBullC
+color pBear   = obBearC
+color pBrBull = brBullC
+color pBrBear = brBearC
+color pFvBull = fvBullC
+color pFvBear = fvBearC
+color pStr    = themeSel == "Classic" ? #f23645 : themeSel == "Neon" ? #ff2d95 : themeSel == "Mono" ? #b2b5be : #ff3b5c
+
+int fillT = themeSel == "Mono" ? 88 : themeSel == "Neon" ? 86 : 82
+int fvgT  = math.min(95, fillT + 6)
+
+// dir codes: 1/-1 order block, 2/-2 breaker, 3/-3 FVG
+zCol(int d)  => d == 1 ? pBull : d == -1 ? pBear : d == 2 ? pBrBull : d == -2 ? pBrBear : d == 3 ? pFvBull : pFvBear
+zFill(int d) => color.new(zCol(d), math.abs(d) == 3 ? fvgT : fillT)
+zExt(int d)  => math.abs(d) == 1 ? extOB : math.abs(d) == 2 ? extBR : extFVG
+zName(int d) => d == 1 ? "Bull OB" : d == -1 ? "Bear OB" : d == 2 ? "Bull Breaker" : d == -2 ? "Bear Breaker" : d == 3 ? "Bull FVG" : "Bear FVG"
+
+hAlign = text.align_center
+
+// "240" -> "4H", "D" -> "1D", "3M" -> "3M"
+tfTag(simple string t) =>
+    float m = str.tonumber(t)
+    string o = str.upper(t)
+    if not na(m)
+        o := m >= 1440 and m % 1440 == 0 ? str.tostring(m / 1440, "#") + "D" :
+             m >= 60   and m % 60   == 0 ? str.tostring(m / 60,   "#") + "H" :
+             str.tostring(m, "#") + "m"
+    else if str.length(o) == 1
+        o := "1" + o
+    o
+
+string htfTag = tfTag(htf)
+
+// Tell the user once, on the chart, when their HTF choice was overridden.
+var label warnLbl = na
+if htfTooLow and barstate.islast
+    label.delete(warnLbl)
+    warnLbl := label.new(bar_index, high,
+         "Shadow Trades: " + htfSel + " is below the chart timeframe — running on " + htfTag + " instead.",
+         style = label.style_label_down, color = color.new(color.orange, 15),
+         textcolor = color.black, size = size.small)
+
+// ═════════════════ HTF data — confirmed bars only ═════════════════
+// Requesting [1] with lookahead_on is the standard non-repaint idiom: it returns
+// the last *closed* HTF bar, correctly aligned on historical and realtime bars.
+[hO, hH, hL, hC, hT, hATR] = request.security(syminfo.tickerid, htf,
+     [open[1], high[1], low[1], close[1], time[1], ta.atr(14)[1]],
+     lookahead = barmerge.lookahead_on)
+
+// hO is checked alongside hT so the warm-up bars, where the timestamp has
+// arrived but the OHLC has not, cannot push a half-formed candle into the store.
+newBar = not na(hT) and not na(hO) and (na(hT[1]) or hT != hT[1])
+
+// Right-hand projection, in bar-time coordinates.
+int chartMs = timeframe.in_seconds(timeframe.period) * 1000
+int rEdge   = time + chartMs * poiOff
+
+// ═════════════════════ HTF bar store ═════════════════════
+var aO = array.new<float>()
+var aH = array.new<float>()
+var aL = array.new<float>()
+var aC = array.new<float>()
+var aT = array.new<int>()
+var int dropped = 0          // HTF bars discarded off the front of the arrays
+
+// ═════════════════════ Structure state ═════════════════════
+var float phP = na           // armed pivot high (consumed on break)
+var int   phI = na
+var float plP = na
+var int   plI = na
+var float svPH = na          // last confirmed pivot high, never consumed
+var int   svPHt = na
+var float svPL = na
+var int   svPLt = na
+var int   bias = 0           // +1 bullish, -1 bearish, 0 undetermined
+
+// Live dealing range
+var float rngH  = na
+var int   rngHt = na
+var float rngL  = na
+var int   rngLt = na
+
+// ═════════════════════ Order block registry ═════════════════════
+// Drawings hold an ABSOLUTE registry id, not a slot index, so trimming the
+// front of the registry can never silently re-point a box at another zone.
+var obTop = array.new<float>()
+var obBot = array.new<float>()
+var obTim = array.new<int>()
+var obDir = array.new<int>()     // +1 bullish OB, -1 bearish OB
+var obBrk = array.new<bool>()
+var obUsd = array.new<bool>()
+var int obDrop = 0               // OB registry entries retired off the front
+
+// OB / breaker drawings
+var dBox  = array.new<box>()
+var dRef  = array.new<int>()
+var dDir  = array.new<int>()     // 1/-1 OB, 2/-2 breaker
+var dLive = array.new<bool>()
+
+// ═════════════════════ FVG registry ═════════════════════
+var fTop  = array.new<float>()
+var fBot  = array.new<float>()
+var fDirA = array.new<int>()
+var fFill = array.new<bool>()
+var int fvDrop = 0               // FVG registry entries retired off the front
+
+// FVG drawings
+var fBox  = array.new<box>()
+var fRef  = array.new<int>()
+var fDirB = array.new<int>()     // 3/-3
+var fLive = array.new<bool>()
+
+// Range drawing objects
+var line lnRH = na
+var line lnRL = na
+var line lnEQ = na
+
+// Structure drawings, newest last
+var msLine = array.new<line>()
+var msLbl  = array.new<label>()
+
+// Alert plumbing
+bool bullSig = false
+bool bearSig = false
+
+// ═════════════════════ Helpers ═════════════════════
+pos(int absIdx) => math.max(0, absIdx - dropped)
+
+// Create a zone box; the POI name is printed inside it.
+newZone(array<box> bxs, array<int> refs, array<int> dirs, array<bool> live,
+         int lft, float top, int rgt, float bot, int d, int regId) =>
+    color c = zCol(d)
+    bool ex = zExt(d)
+    box bx = box.new(lft, top, ex ? rgt : time, bot, xloc = xloc.bar_time,
+         extend = ex ? extend.right : extend.none,
+         bgcolor = zFill(d), border_color = color.new(color.black, 100), border_width = 0,
+         text = labelPOI ? htfTag + " " + zName(d) : "",
+         text_color = color.new(c, 15), text_size = size.small,
+         text_halign = hAlign, text_valign = text.align_center)
+    array.push(bxs, bx)
+    array.push(refs, regId)
+    array.push(dirs, d)
+    array.push(live, true)
+
+// Retire the drawing at index m: delete it, or freeze and dim it in place.
+retireAt(array<box> bxs, array<int> refs, array<int> dirs, array<bool> live, int m, int stamp) =>
+    box bx = array.get(bxs, m)
+    int d  = array.get(dirs, m)
+    if hideHist
+        array.remove(bxs, m)
+        array.remove(refs, m)
+        array.remove(dirs, m)
+        array.remove(live, m)
+        box.delete(bx)
+    else
+        array.set(live, m, false)
+        box.set_extend(bx, extend.none)
+        box.set_right(bx, stamp)
+        box.set_text(bx, "")
+        box.set_bgcolor(bx, color.new(zCol(d), 94))
+
+// Retire the drawing that points at registry id regId with dir d1 or d2.
+retireRef(array<box> bxs, array<int> refs, array<int> dirs, array<bool> live,
+           int regId, int d1, int d2, int stamp) =>
+    if array.size(refs) > 0
+        for m = array.size(refs) - 1 to 0
+            if array.get(refs, m) == regId and (array.get(dirs, m) == d1 or array.get(dirs, m) == d2)
+                retireAt(bxs, refs, dirs, live, m, stamp)
+                break
+
+// Keep at most `cap` drawings of a given dir. An already-invalidated zone goes
+// before a live one, so an active POI is never pushed off the chart by a
+// frozen leftover that price has finished with.
+prune(array<box> bxs, array<int> refs, array<int> dirs, array<bool> live, int dir, int cap) =>
+    int cnt = 0
+    if array.size(dirs) > 0
+        for k = 0 to array.size(dirs) - 1
+            if array.get(dirs, k) == dir
+                cnt += 1
+    if cnt > cap
+        int victim = -1
+        for k = 0 to array.size(dirs) - 1
+            if array.get(dirs, k) == dir and not array.get(live, k)
+                victim := k
+                break
+        if victim < 0
+            for k = 0 to array.size(dirs) - 1
+                if array.get(dirs, k) == dir
+                    victim := k
+                    break
+        if victim >= 0
+            box bx = array.get(bxs, victim)
+            array.remove(bxs, victim)
+            array.remove(refs, victim)
+            array.remove(dirs, victim)
+            array.remove(live, victim)
+            box.delete(bx)
+
+// Hide Historical: drop every zone that originated before the current range.
+purgeOlder(array<box> bxs, array<int> refs, array<int> dirs, array<bool> live, int cutoff) =>
+    if not na(cutoff) and array.size(bxs) > 0
+        for k = array.size(bxs) - 1 to 0
+            if box.get_left(array.get(bxs, k)) < cutoff
+                box bx = array.get(bxs, k)
+                array.remove(bxs, k)
+                array.remove(refs, k)
+                array.remove(dirs, k)
+                array.remove(live, k)
+                box.delete(bx)
+
+// Keep only the most recent structure breaks when Hide Historical is on.
+trimStructure() =>
+    int cap = hideHist ? msKeep : 200
+    while array.size(msLine) > cap
+        line.delete(array.shift(msLine))
+        label old = array.shift(msLbl)
+        if not na(old)
+            label.delete(old)
+
+// Project live zones past the last bar. Only the rightmost bar can move the
+// right edge, so this runs once at the end of the series rather than per bar.
+refresh(array<box> bxs, array<int> dirs, array<bool> live, int edge) =>
+    if array.size(bxs) > 0
+        for k = 0 to array.size(bxs) - 1
+            if array.get(live, k)
+                box bx  = array.get(bxs, k)
+                bool ex = zExt(array.get(dirs, k))
+                box.set_right(bx, ex ? edge : time)
+                box.set_extend(bx, ex ? extend.right : extend.none)
+
+// ═════════════════════ Main — once per closed HTF bar ═════════════════════
+if newBar
+    array.push(aO, hO)
+    array.push(aH, hH)
+    array.push(aL, hL)
+    array.push(aC, hC)
+    array.push(aT, hT)
+
+    if array.size(aT) > 2000
+        array.shift(aO), array.shift(aH), array.shift(aL), array.shift(aC), array.shift(aT)
+        dropped += 1
+
+    int n = array.size(aT)
+
+    // ── 1a. Order block invalidation (HTF close through the far side)
+    if array.size(obDir) > 0
+        for k = 0 to array.size(obDir) - 1
+            if not array.get(obBrk, k)
+                int d = array.get(obDir, k)
+                bool hit = (d == 1 and hC < array.get(obBot, k)) or (d == -1 and hC > array.get(obTop, k))
+                if hit
+                    array.set(obBrk, k, true)
+                    retireRef(dBox, dRef, dDir, dLive, k + obDrop, 1, -1, hT)
+
+    // ── 1b. Breaker invalidation (close back through the breaker)
+    if array.size(dDir) > 0
+        for k = array.size(dDir) - 1 to 0
+            if array.get(dLive, k) and math.abs(array.get(dDir, k)) == 2
+                box bx = array.get(dBox, k)
+                int d  = array.get(dDir, k)
+                bool hit = (d == 2 and hC < box.get_bottom(bx)) or (d == -2 and hC > box.get_top(bx))
+                if hit
+                    retireAt(dBox, dRef, dDir, dLive, k, hT)
+
+    // ── 1c. FVG fill / shrink
+    if array.size(fDirA) > 0
+        for k = 0 to array.size(fDirA) - 1
+            if not array.get(fFill, k)
+                int d      = array.get(fDirA, k)
+                float top  = array.get(fTop, k)
+                float bot  = array.get(fBot, k)
+                float probe = d == 1 ? (fvgByWick ? hL : hC) : (fvgByWick ? hH : hC)
+                bool full  = d == 1 ? probe <= bot : probe >= top
+                if full
+                    array.set(fFill, k, true)
+                    retireRef(fBox, fRef, fDirB, fLive, k + fvDrop, 3, -3, hT)
+                else if fvgShrink
+                    if d == 1 and probe < top
+                        array.set(fTop, k, probe)
+                        if array.size(fRef) > 0
+                            for m = 0 to array.size(fRef) - 1
+                                if array.get(fRef, m) == k + fvDrop and array.get(fLive, m)
+                                    box.set_top(array.get(fBox, m), probe)
+                                    break
+                    if d == -1 and probe > bot
+                        array.set(fBot, k, probe)
+                        if array.size(fRef) > 0
+                            for m = 0 to array.size(fRef) - 1
+                                if array.get(fRef, m) == k + fvDrop and array.get(fLive, m)
+                                    box.set_bottom(array.get(fBox, m), probe)
+                                    break
+
+    // ── 2. New FVG on the three most recent HTF bars
+    if showFVG and n >= 3
+        float h2 = array.get(aH, n - 3)
+        float l2 = array.get(aL, n - 3)
+        int   gdir = 0
+        float gt = na
+        float gb = na
+        if hL > h2
+            gdir := 1
+            gt := hL
+            gb := h2
+        else if hH < l2
+            gdir := -1
+            gt := l2
+            gb := hH
+        if gdir != 0
+            float gap = gt - gb
+            bool big = fvgMinAtr <= 0 or na(hATR) or hATR <= 0 or gap >= hATR * fvgMinAtr
+            if big
+                array.push(fTop, gt), array.push(fBot, gb)
+                array.push(fDirA, gdir), array.push(fFill, false)
+                newZone(fBox, fRef, fDirB, fLive, array.get(aT, n - 2), gt, rEdge, gb,
+                     gdir == 1 ? 3 : -3, array.size(fDirA) - 1 + fvDrop)
+                prune(fBox, fRef, fDirB, fLive, gdir == 1 ? 3 : -3, maxLive)
+
+    // ── 3. Pivot confirmation on the bar pvLen back
+    if n > pvLen * 2
+        int p     = n - 1 - pvLen
+        float cH  = array.get(aH, p)
+        float cL  = array.get(aL, p)
+        bool isPH = true
+        bool isPL = true
+        for k = p - pvLen to p + pvLen
+            if k != p
+                if array.get(aH, k) >= cH
+                    isPH := false
+                if array.get(aL, k) <= cL
+                    isPL := false
+        if isPH
+            phP  := cH
+            phI  := dropped + p
+            svPH := cH
+            svPHt := array.get(aT, p)
+        if isPL
+            plP  := cL
+            plI  := dropped + p
+            svPL := cL
+            svPLt := array.get(aT, p)
+
+    // ── 4. Structure breaks
+    bool bullBrk = not na(phP) and hC > phP
+    bool bearBrk = not na(plP) and hC < plP
+
+    if bullBrk
+        bullSig := true
+        bool isShift = bias == -1
+        bias := 1
+
+        // range flips: protected low fixed, high now tracks the expansion.
+        // Before the first confirmed pivot low there is nothing to protect, so
+        // the breaking candle stands in until the next break replaces it.
+        rngL  := na(svPL)  ? hL : svPL
+        rngLt := na(svPLt) ? hT : svPLt
+        rngH  := hH
+        rngHt := hT
+
+        if hideHist
+            int cut = math.min(rngHt, rngLt)
+            purgeOlder(dBox, dRef, dDir, dLive, cut)
+            purgeOlder(fBox, fRef, fDirB, fLive, cut)
+
+        if showMS
+            line ml = line.new(array.get(aT, math.max(pos(phI), n - 1 - msLen)), phP, hT, phP,
+                 xloc = xloc.bar_time, color = pStr, width = lineW)
+            label mlb = label.new(hT, phP, isShift ? "MSS" : "MSB", xloc = xloc.bar_time,
+                 style = label.style_label_down, color = color.new(color.black, 100),
+                 textcolor = pStr, size = size.tiny)
+            array.push(msLine, ml)
+            array.push(msLbl, mlb)
+            trimStructure()
+
+        // The order block must PRECEDE the break, so the search starts one bar
+        // back: a break candle can gap up, sell off and still close through.
+        int obP = -1
+        if n >= 2
+            for k = n - 2 to math.max(0, n - 1 - obLook)
+                if array.get(aC, k) < array.get(aO, k)
+                    obP := k
+                    break
+
+        if obP >= 0
+            float top = useWick ? array.get(aH, obP) : math.max(array.get(aO, obP), array.get(aC, obP))
+            float bot = useWick ? array.get(aL, obP) : math.min(array.get(aO, obP), array.get(aC, obP))
+            array.push(obTop, top), array.push(obBot, bot)
+            array.push(obTim, array.get(aT, obP))
+            array.push(obDir, 1), array.push(obBrk, false), array.push(obUsd, false)
+            if showOB
+                newZone(dBox, dRef, dDir, dLive, array.get(aT, obP), top, rEdge, bot, 1,
+                     array.size(obDir) - 1 + obDrop)
+                prune(dBox, dRef, dDir, dLive, 1, maxLive)
+
+        if showBR and array.size(obDir) > 0
+            int bk = -1
+            for k = array.size(obDir) - 1 to 0
+                if array.get(obDir, k) == -1 and array.get(obBrk, k) and not array.get(obUsd, k)
+                    bk := k
+                    break
+            if bk >= 0
+                array.set(obUsd, bk, true)
+                newZone(dBox, dRef, dDir, dLive, array.get(obTim, bk), array.get(obTop, bk), rEdge,
+                     array.get(obBot, bk), 2, bk + obDrop)
+                prune(dBox, dRef, dDir, dLive, 2, maxLive)
+
+        phP := na
+
+    else if bearBrk
+        bearSig := true
+        bool isShift = bias == 1
+        bias := -1
+
+        rngH  := na(svPH)  ? hH : svPH
+        rngHt := na(svPHt) ? hT : svPHt
+        rngL  := hL
+        rngLt := hT
+
+        if hideHist
+            int cut = math.min(rngHt, rngLt)
+            purgeOlder(dBox, dRef, dDir, dLive, cut)
+            purgeOlder(fBox, fRef, fDirB, fLive, cut)
+
+        if showMS
+            line ml = line.new(array.get(aT, math.max(pos(plI), n - 1 - msLen)), plP, hT, plP,
+                 xloc = xloc.bar_time, color = pStr, width = lineW)
+            label mlb = label.new(hT, plP, isShift ? "MSS" : "MSB", xloc = xloc.bar_time,
+                 style = label.style_label_up, color = color.new(color.black, 100),
+                 textcolor = pStr, size = size.tiny)
+            array.push(msLine, ml)
+            array.push(msLbl, mlb)
+            trimStructure()
+
+        int obP = -1
+        if n >= 2
+            for k = n - 2 to math.max(0, n - 1 - obLook)
+                if array.get(aC, k) > array.get(aO, k)
+                    obP := k
+                    break
+
+        if obP >= 0
+            float top = useWick ? array.get(aH, obP) : math.max(array.get(aO, obP), array.get(aC, obP))
+            float bot = useWick ? array.get(aL, obP) : math.min(array.get(aO, obP), array.get(aC, obP))
+            array.push(obTop, top), array.push(obBot, bot)
+            array.push(obTim, array.get(aT, obP))
+            array.push(obDir, -1), array.push(obBrk, false), array.push(obUsd, false)
+            if showOB
+                newZone(dBox, dRef, dDir, dLive, array.get(aT, obP), top, rEdge, bot, -1,
+                     array.size(obDir) - 1 + obDrop)
+                prune(dBox, dRef, dDir, dLive, -1, maxLive)
+
+        if showBR and array.size(obDir) > 0
+            int bk = -1
+            for k = array.size(obDir) - 1 to 0
+                if array.get(obDir, k) == 1 and array.get(obBrk, k) and not array.get(obUsd, k)
+                    bk := k
+                    break
+            if bk >= 0
+                array.set(obUsd, bk, true)
+                newZone(dBox, dRef, dDir, dLive, array.get(obTim, bk), array.get(obTop, bk), rEdge,
+                     array.get(obBot, bk), -2, bk + obDrop)
+                prune(dBox, dRef, dDir, dLive, -2, maxLive)
+
+        plP := na
+
+    // ── 5. Extend the running side of the range
+    if bias == 1 and not na(rngH) and hH > rngH
+        rngH  := hH
+        rngHt := hT
+    if bias == -1 and not na(rngL) and hL < rngL
+        rngL  := hL
+        rngLt := hT
+
+    // ── 6. Bound the registries. Without this the 1a / 1c scans walk every
+    // zone ever recorded on every HTF bar, and a long history on a fast HTF
+    // eventually trips Pine's per-bar execution limit. regCap sits far above
+    // the drawing caps, so a trimmed entry can never still own a live box.
+    while array.size(obDir) > regCap
+        array.shift(obTop), array.shift(obBot), array.shift(obTim)
+        array.shift(obDir), array.shift(obBrk), array.shift(obUsd)
+        obDrop += 1
+    while array.size(fDirA) > regCap
+        array.shift(fTop), array.shift(fBot), array.shift(fDirA), array.shift(fFill)
+        fvDrop += 1
+
+// ═════════════ Right-edge projection, once at the end of the series ═════════════
+if barstate.islast
+    refresh(dBox, dDir, dLive, rEdge)
+    refresh(fBox, fDirB, fLive, rEdge)
+
+// ═════════════════════ Dealing range ═════════════════════
+if showRng and not na(rngH) and not na(rngL)
+    float eq = (rngH + rngL) / 2
+    color rcRaw = bias == 1 ? rngBullC : bias == -1 ? rngBearC : pStr
+    color rc    = color.new(rcRaw, rngDim)
+    color rcEQ  = color.new(rcRaw, math.min(95, rngDim + 15))
+
+    if na(lnRH)
+        lnRH := line.new(rngHt, rngH, rEdge, rngH, xloc = xloc.bar_time, extend = extend.right, color = rc, width = lineW)
+        lnRL := line.new(rngLt, rngL, rEdge, rngL, xloc = xloc.bar_time, extend = extend.right, color = rc, width = lineW)
+        lnEQ := line.new(rngLt, eq,   rEdge, eq,   xloc = xloc.bar_time, extend = extend.right, color = rcEQ, width = lineW, style = line.style_dotted)
+
+    int lft = math.min(rngHt, rngLt)
+
+    line.set_xy1(lnRH, rngHt, rngH), line.set_xy2(lnRH, rEdge, rngH)
+    line.set_xy1(lnRL, rngLt, rngL), line.set_xy2(lnRL, rEdge, rngL)
+    line.set_xy1(lnEQ, lft,   eq),   line.set_xy2(lnEQ, rEdge, eq)
+    line.set_color(lnRH, rc)
+    line.set_color(lnRL, rc)
+    line.set_color(lnEQ, showEQ ? rcEQ : color.new(rcEQ, 100))
+
+// ═════════════════════ Moving averages ═════════════════════
+float emaF = ta.ema(close, emaLenF)
+float emaS = ta.ema(close, emaLenS)
+
+plot(showEmas ? emaF : na, "EMA 50",  color = emaColF, linewidth = 1,
+     style = plot.style_line, display = display.all - display.price_scale)
+plot(showEmas ? emaS : na, "EMA 200", color = emaColS, linewidth = 1,
+     style = plot.style_line, display = display.all - display.price_scale)
+
+// ═════════════════════ Alerts ═════════════════════
+alertcondition(bullSig, "HTF Bullish Structure (MSB / MSS)", "Bullish market structure break or shift on the HTF")
+alertcondition(bearSig, "HTF Bearish Structure (MSB / MSS)", "Bearish market structure break or shift on the HTF")
