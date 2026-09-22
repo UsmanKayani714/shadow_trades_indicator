@@ -43,6 +43,11 @@ it. A break that agrees with the current bias prints **MSB**; one that reverses
 it prints **MSS**. The very first break on a chart has no prior bias to continue,
 so it establishes one and prints **MSS**.
 
+The marker is drawn at the broken swing's own price — the high of a pivot-high
+candle, the low of a pivot-low candle — and anchored on that candle, so the line
+starts at the tip of the wick being broken and runs across to the candle that
+closed through it.
+
 Because a pivot is only valid when no neighbouring candle exceeded it, a break
 can never be "missed" during the confirmation window — the first close through
 the level always happens after the pivot is armed.
@@ -183,7 +188,6 @@ settings panel:
 | `rngDim` | 45 | Transparency of the dealing-range lines. |
 | `useWick` | `true` | Order block spans the full candle, wick to wick. |
 | `obLook` | 60 | HTF bars searched back for the order block candle. |
-| `msLen` | 4 | Length of an MSS / MSB marker, in HTF bars. |
 | `fvgMinAtr` | 0.0 | Minimum gap size in HTF ATR14 multiples (0 = no filter). |
 | `fvgShrink` | `true` | Trim a gap as price fills into it. |
 | `fvgByWick` | `true` | A gap fills on wicks rather than closes. |

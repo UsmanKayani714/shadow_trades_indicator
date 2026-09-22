@@ -113,7 +113,6 @@ showEmas = input.bool(false, "Display EMAs", group = gY, inline = "s5",
 int   rngDim    = 45    // transparency of the dealing-range lines
 bool  useWick   = true  // order block spans the full candle, wick to wick
 int   obLook    = 60    // HTF bars searched back for the order block candle
-int   msLen     = 4     // length of an MSS / MSB marker, in HTF bars
 float fvgMinAtr = 0.0   // minimum gap size in HTF ATR14 multiples (0 = no filter)
 bool  fvgShrink = true  // trim a gap as price fills into it
 bool  fvgByWick = true  // a gap fills on wicks, not closes
@@ -525,7 +524,9 @@ if newBar
             purgeOlder(fBox, fRef, fDirB, fLive, cut)
 
         if showMS
-            line ml = line.new(array.get(aT, math.max(pos(phI), n - 1 - msLen)), phP, hT, phP,
+            // Anchored on the swing candle itself, so the line starts at the
+            // tip of the wick it is breaking and runs across to the break.
+            line ml = line.new(array.get(aT, pos(phI)), phP, hT, phP,
                  xloc = xloc.bar_time, color = pStr, width = lineW)
             label mlb = label.new(hT, phP, isShift ? "MSS" : "MSB", xloc = xloc.bar_time,
                  style = label.style_label_down, color = color.new(color.black, 100),
@@ -620,7 +621,7 @@ if newBar
             purgeOlder(fBox, fRef, fDirB, fLive, cut)
 
         if showMS
-            line ml = line.new(array.get(aT, math.max(pos(plI), n - 1 - msLen)), plP, hT, plP,
+            line ml = line.new(array.get(aT, pos(plI)), plP, hT, plP,
                  xloc = xloc.bar_time, color = pStr, width = lineW)
             label mlb = label.new(hT, plP, isShift ? "MSS" : "MSB", xloc = xloc.bar_time,
                  style = label.style_label_up, color = color.new(color.black, 100),
