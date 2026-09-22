@@ -40,7 +40,8 @@ what makes the pivot final rather than provisional.
 
 A **break** requires an HTF *close* through the pivot level, not a wick through
 it. A break that agrees with the current bias prints **MSB**; one that reverses
-it prints **MSS**.
+it prints **MSS**. The very first break on a chart has no prior bias to continue,
+so it establishes one and prints **MSS**.
 
 Because a pivot is only valid when no neighbouring candle exceeded it, a break
 can never be "missed" during the confirmation window — the first close through
@@ -52,11 +53,19 @@ On a bullish break, the script walks back from the candle *before* the break
 looking for the most recent down-close candle; that candle becomes the bullish
 order block (wick to wick by default). The mirror applies to bearish breaks.
 
-An order block is **invalidated** when an HTF candle *closes* through its far
-side — below the low of a bullish OB, above the high of a bearish OB. An
-invalidated order block is not discarded: the next opposite structure break
-promotes it to a **breaker**, which is itself invalidated when price closes back
-through it.
+An order block is **retired** on whichever event *Retire an OB / Breaker on*
+names: an HTF candle **closing through** its far side (the default — a wick raid
+leaves the zone alive), or the **first touch** of the zone by any HTF candle.
+Breakers follow the same setting.
+
+Promotion is tracked separately and always needs a close through, whichever mode
+you pick, because a close through the block is what makes it a *failed* one. So a
+block retired on first touch can still be promoted to a **breaker** later, when
+the next opposite structure break arrives.
+
+With *Hide Historical* on, only blocks from within the current dealing range are
+eligible for promotion, so a breaker cannot appear out of a leg you have already
+told the script to forget.
 
 ### Fair value gaps
 
@@ -66,9 +75,17 @@ default (`fvgByWick`); flip it to close-fill in the constants block.
 
 ### Dealing range
 
-On each break the protected swing on the origin side is fixed and the opposite
-side tracks the expansion, so the range always describes the leg currently in
-play. Equilibrium is the midpoint.
+On each break the boundary on the origin side is fixed and the opposite side
+tracks the expansion, so the range always describes the leg currently in play.
+Equilibrium is the midpoint.
+
+Which boundary gets fixed depends on the break:
+
+- On a **shift**, the leg that just ended owns it, and that leg's true extreme
+  often prints inside the last `pvLen` candles where no pivot could ever be
+  confirmed — so the running extreme is kept.
+- On a **continuation**, the newest confirmed swing is the one being protected,
+  so that is used instead.
 
 ---
 
@@ -111,6 +128,10 @@ rather than quietly serving you lookahead bias.
 Three slots, each assignable to `Order Blocks`, `Breakers`, `Fair Value Gaps` or
 `None`, with a per-slot **Extend** toggle (run to the right edge, or stop at the
 current bar). `Max POIs per type / side` caps how many of each kind are kept.
+
+`Retire an OB / Breaker on` chooses between `Close through` (default) and
+`First touch`. Fair value gaps are unaffected — they keep their own fill model,
+set by `fvgByWick` and `fvgShrink` in the constants block.
 
 Order blocks are tracked internally even when not displayed, because breakers
 are derived from them.
@@ -161,7 +182,7 @@ rolls over.
 
 ## Review notes
 
-### Fixed in this version
+### Round 1 — correctness and cost
 
 1. **Lookahead bias when the selected HTF was below the chart's.**
    `lookahead_on` on a lower-resolution request hands historical bars data that
@@ -207,26 +228,55 @@ rolls over.
    far side — invalidation, not mitigation-on-touch. The tooltip now matches the
    behaviour.
 
-### Known limitations, left as-is
+### Round 2 — behaviour
 
-- **Invalidation vs. mitigation.** A zone is retired on a close through its far
-  side, not on first touch. That is a defensible model — it keeps a zone alive
-  through a wick raid — but it is a choice, and traders who want touch-based
-  mitigation would need a second mode.
-- **Protected swing vs. running extreme.** On a bias flip the range boundary is
-  set to the last *confirmed* pivot. When the final push made its extreme within
-  `pvLen` candles of the flip, no pivot was ever confirmed there, so the range
-  understates the leg by that much. Taking `math.max(svPH, rngH)` would track the
-  true extreme, at the cost of the "protected swing" semantics.
-- **First break prints MSB.** With `bias == 0` there is no prior bias to shift
-  from, so the very first break on a chart is labelled MSB. Arguably it should be
-  unlabelled.
-- **`poiOff` is measured in bar-time, not session time.** The right-edge
-  projection is `time + chartTF × poiOff`, which runs through weekends and
-  session gaps, so the POI label can sit further right than `poiOff` visible
-  candles on a non-24/7 symbol. Cosmetic only.
-- **Purged registry entries can still spawn breakers.** With *Hide Historical*
-  on, `purgeOlder` removes drawings but leaves registry entries, so an order
-  block from before the current range can still be promoted to a breaker later.
-  This is arguably the point of a breaker, so it is left alone — but it does mean
-  a box can appear from outside the "current range only" window.
+9. **Retirement was hard-wired to close-through.** A zone survived until an HTF
+   candle closed past its far side, with no way to ask for touch-based
+   mitigation. Now a setting. The awkward part is that breaker promotion *must*
+   stay close-based — a block is only breaker material once price has closed
+   through it — so the registry now carries two separate flags: `obBrk` (closed
+   through, structural, drives promotion) and `obMit` (drawing retired, follows
+   the setting). Collapsing them would have made `First touch` quietly kill
+   every breaker.
+
+10. **The dealing range understated the leg on a bias flip.** The boundary was
+    set to the last *confirmed* pivot, but a leg's extreme routinely prints
+    within `pvLen` candles of the flip, where no pivot can ever be confirmed —
+    so the range stopped short of the actual high or low. On a shift the running
+    extreme is now kept; on a continuation the newest swing still wins, which is
+    the correct answer for that case.
+
+11. **The first break on a chart printed MSB.** `isShift` tested `bias == -1`,
+    so `bias == 0` fell through to "continuation" — of nothing. Now `bias != 1`,
+    and the first break prints MSS.
+
+12. **`POI Text Offset` did not do what it said.** Two problems at once. The
+    name was box text with `text_halign = center` inside an extended box, so it
+    landed halfway between the zone's own left edge and the projection point —
+    a zone from 200 candles back put its name ~100 candles back, not 16 forward.
+    And the projection itself was `time + chartTF × poiOff`, a wall-clock span,
+    which weekends and session breaks stretch on anything that is not 24/7.
+    The name is now a separate `xloc.bar_index` label pinned at
+    `bar_index + poiOff` — a real bar count, measured from the right edge. The
+    labels are pooled and repositioned on the last bar rather than recreated.
+
+13. **`Hide Historical` leaked zones from outside the current range.**
+    `purgeOlder` removed drawings but left registry entries, so an order block
+    from a leg the user had told the script to forget could still be promoted
+    into view as a breaker. Promotion is now gated on the block sitting inside
+    the current range window.
+
+### Behaviour worth knowing
+
+- **`First touch` is aggressive by design.** An order block created a candle or
+  two from price will often be touched almost immediately, because the candles
+  that drove the break had to trade through the zone to get there. That is what
+  touch mitigation means; it is why `Close through` is the default.
+- **Fair value gaps ignore the retirement setting.** A gap has its own model —
+  it shrinks as it is filled and retires once fully traversed, per `fvgShrink`
+  and `fvgByWick`.
+- **Pivot confirmation is `pvLen` HTF candles late, by construction.** That lag
+  is what makes a pivot final rather than provisional. It cannot cause a missed
+  break: pivot validity requires every neighbouring candle's high to sit below
+  the pivot, so no candle inside the confirmation window can have closed through
+  it.

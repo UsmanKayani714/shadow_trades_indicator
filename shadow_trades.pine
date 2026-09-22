@@ -53,7 +53,7 @@ themeSel = input.string("Terminal", "Visual Theme", group = gB,
 
 labelPOI = input.bool(true, "Label Active POIs", group = gB, inline = "poi")
 poiOff   = input.int(16, "POI Text Offset (bars)", minval = 0, maxval = 400, group = gB, inline = "poi",
-     tooltip = "POIs and the range always run to the right edge. This shifts the POI name, printed inside its box, that many bars past the last candle.")
+     tooltip = "POIs and the range always run to the right edge. This prints the POI name that many chart candles past the last one — a true bar count, so a weekend or a session break does not stretch it.")
 
 // ═════════════ HIGHER TIMEFRAME POINTS OF INTEREST ═════════════
 gP = "HIGHER TIMEFRAME POINTS OF INTEREST"
@@ -76,6 +76,10 @@ extBR  = (poi1 == "Breakers"        and ext1) or (poi2 == "Breakers"        and 
 extFVG = (poi1 == "Fair Value Gaps" and ext1) or (poi2 == "Fair Value Gaps" and ext2) or (poi3 == "Fair Value Gaps" and ext3)
 
 maxLive = input.int(4, "Max POIs per type / side", minval = 1, maxval = 15, group = gP)
+poiMit  = input.string("Close through", "Retire an OB / Breaker on", options = ["Close through", "First touch"], group = gP,
+     tooltip = "Close through — the zone survives until an HTF candle CLOSES past its far side, so a wick raid leaves it alive.\n\nFirst touch — the zone is retired as soon as an HTF candle trades into it at all.\n\nPromotion to a breaker always requires a close through, whichever you pick: a close through the block is what makes it a failed one. Fair value gaps keep their own fill rules.")
+
+bool poiTouch = poiMit == "First touch"
 
 // ═══════════════════════ STRUCTURE ═══════════════════════
 gS = "STRUCTURE"
@@ -132,8 +136,6 @@ zCol(int d)  => d == 1 ? pBull : d == -1 ? pBear : d == 2 ? pBrBull : d == -2 ? 
 zFill(int d) => color.new(zCol(d), math.abs(d) == 3 ? fvgT : fillT)
 zExt(int d)  => math.abs(d) == 1 ? extOB : math.abs(d) == 2 ? extBR : extFVG
 zName(int d) => d == 1 ? "Bull OB" : d == -1 ? "Bear OB" : d == 2 ? "Bull Breaker" : d == -2 ? "Bear Breaker" : d == 3 ? "Bull FVG" : "Bear FVG"
-
-hAlign = text.align_center
 
 // "240" -> "4H", "D" -> "1D", "3M" -> "3M"
 tfTag(simple string t) =>
@@ -205,7 +207,8 @@ var obTop = array.new<float>()
 var obBot = array.new<float>()
 var obTim = array.new<int>()
 var obDir = array.new<int>()     // +1 bullish OB, -1 bearish OB
-var obBrk = array.new<bool>()
+var obBrk = array.new<bool>()    // closed through — structural, gates breaker promotion
+var obMit = array.new<bool>()    // drawing retired — follows the Retire on setting
 var obUsd = array.new<bool>()
 var int obDrop = 0               // OB registry entries retired off the front
 
@@ -228,6 +231,9 @@ var fRef  = array.new<int>()
 var fDirB = array.new<int>()     // 3/-3
 var fLive = array.new<bool>()
 
+// POI name labels, pooled and repositioned on the last bar
+var poiLbl = array.new<label>()
+
 // Range drawing objects
 var line lnRH = na
 var line lnRL = na
@@ -245,16 +251,15 @@ bool bearSig = false
 pos(int absIdx) => math.max(0, absIdx - dropped)
 
 // Create a zone box; the POI name is printed inside it.
+// The name is NOT box text: a centred caption inside an extended box lands
+// halfway between the zone and the right edge, which is not what POI Text
+// Offset promises. It is drawn as a separate bar-index label instead.
 newZone(array<box> bxs, array<int> refs, array<int> dirs, array<bool> live,
          int lft, float top, int rgt, float bot, int d, int regId) =>
-    color c = zCol(d)
     bool ex = zExt(d)
     box bx = box.new(lft, top, ex ? rgt : time, bot, xloc = xloc.bar_time,
          extend = ex ? extend.right : extend.none,
-         bgcolor = zFill(d), border_color = color.new(color.black, 100), border_width = 0,
-         text = labelPOI ? htfTag + " " + zName(d) : "",
-         text_color = color.new(c, 15), text_size = size.small,
-         text_halign = hAlign, text_valign = text.align_center)
+         bgcolor = zFill(d), border_color = color.new(color.black, 100), border_width = 0)
     array.push(bxs, bx)
     array.push(refs, regId)
     array.push(dirs, d)
@@ -274,7 +279,6 @@ retireAt(array<box> bxs, array<int> refs, array<int> dirs, array<bool> live, int
         array.set(live, m, false)
         box.set_extend(bx, extend.none)
         box.set_right(bx, stamp)
-        box.set_text(bx, "")
         box.set_bgcolor(bx, color.new(zCol(d), 94))
 
 // Retire the drawing that points at registry id regId with dir d1 or d2.
@@ -360,23 +364,33 @@ if newBar
 
     int n = array.size(aT)
 
-    // ── 1a. Order block invalidation (HTF close through the far side)
+    // ── 1a. Order blocks. A close through the far side marks the block FAILED,
+    // which is what makes it breaker material, and is tracked whatever the user
+    // picked. The drawing retires on whichever event they did pick.
     if array.size(obDir) > 0
         for k = 0 to array.size(obDir) - 1
+            int d = array.get(obDir, k)
             if not array.get(obBrk, k)
-                int d = array.get(obDir, k)
-                bool hit = (d == 1 and hC < array.get(obBot, k)) or (d == -1 and hC > array.get(obTop, k))
-                if hit
+                bool through = (d == 1 and hC < array.get(obBot, k)) or (d == -1 and hC > array.get(obTop, k))
+                if through
                     array.set(obBrk, k, true)
+            if not array.get(obMit, k)
+                bool gone = poiTouch ?
+                     (d == 1 ? hL <= array.get(obTop, k) : hH >= array.get(obBot, k)) :
+                     array.get(obBrk, k)
+                if gone
+                    array.set(obMit, k, true)
                     retireRef(dBox, dRef, dDir, dLive, k + obDrop, 1, -1, hT)
 
-    // ── 1b. Breaker invalidation (close back through the breaker)
+    // ── 1b. Breakers, retired on the same rule the user chose for blocks
     if array.size(dDir) > 0
         for k = array.size(dDir) - 1 to 0
             if array.get(dLive, k) and math.abs(array.get(dDir, k)) == 2
                 box bx = array.get(dBox, k)
                 int d  = array.get(dDir, k)
-                bool hit = (d == 2 and hC < box.get_bottom(bx)) or (d == -2 and hC > box.get_top(bx))
+                bool hit = poiTouch ?
+                     (d == 2 ? hL <= box.get_top(bx) : hH >= box.get_bottom(bx)) :
+                     (d == 2 ? hC < box.get_bottom(bx) : hC > box.get_top(bx))
                 if hit
                     retireAt(dBox, dRef, dDir, dLive, k, hT)
 
@@ -463,19 +477,26 @@ if newBar
 
     if bullBrk
         bullSig := true
-        bool isShift = bias == -1
+        // With no bias yet there is no trend to continue, so the first break a
+        // chart produces establishes one: that is a shift, not a continuation.
+        bool isShift = bias != 1
         bias := 1
 
-        // range flips: protected low fixed, high now tracks the expansion.
-        // Before the first confirmed pivot low there is nothing to protect, so
-        // the breaking candle stands in until the next break replaces it.
-        rngL  := na(svPL)  ? hL : svPL
-        rngLt := na(svPLt) ? hT : svPLt
+        // Range flips: protected low fixed, high now tracks the expansion.
+        // On a shift the down leg that just ended owns the low, and its true
+        // extreme can print inside the last pvLen candles, where no pivot could
+        // ever be confirmed — so the running extreme wins. On a continuation the
+        // newer swing is the one being protected. Before any pivot exists the
+        // breaking candle stands in until the next break replaces it.
+        bool keepL = isShift and not na(rngL) and (na(svPL) or rngL < svPL)
+        if not keepL
+            rngL  := na(svPL)  ? hL : svPL
+            rngLt := na(svPLt) ? hT : svPLt
         rngH  := hH
         rngHt := hT
 
+        int cut = math.min(rngHt, rngLt)
         if hideHist
-            int cut = math.min(rngHt, rngLt)
             purgeOlder(dBox, dRef, dDir, dLive, cut)
             purgeOlder(fBox, fRef, fDirB, fLive, cut)
 
@@ -503,7 +524,8 @@ if newBar
             float bot = useWick ? array.get(aL, obP) : math.min(array.get(aO, obP), array.get(aC, obP))
             array.push(obTop, top), array.push(obBot, bot)
             array.push(obTim, array.get(aT, obP))
-            array.push(obDir, 1), array.push(obBrk, false), array.push(obUsd, false)
+            array.push(obDir, 1), array.push(obBrk, false)
+            array.push(obMit, false), array.push(obUsd, false)
             if showOB
                 newZone(dBox, dRef, dDir, dLive, array.get(aT, obP), top, rEdge, bot, 1,
                      array.size(obDir) - 1 + obDrop)
@@ -512,7 +534,10 @@ if newBar
         if showBR and array.size(obDir) > 0
             int bk = -1
             for k = array.size(obDir) - 1 to 0
-                if array.get(obDir, k) == -1 and array.get(obBrk, k) and not array.get(obUsd, k)
+                // Hide Historical promises the current range only, so a block
+                // from before it cannot be promoted into view as a breaker.
+                bool inWin = not hideHist or na(cut) or array.get(obTim, k) >= cut
+                if array.get(obDir, k) == -1 and array.get(obBrk, k) and not array.get(obUsd, k) and inWin
                     bk := k
                     break
             if bk >= 0
@@ -525,16 +550,18 @@ if newBar
 
     else if bearBrk
         bearSig := true
-        bool isShift = bias == 1
+        bool isShift = bias != -1
         bias := -1
 
-        rngH  := na(svPH)  ? hH : svPH
-        rngHt := na(svPHt) ? hT : svPHt
+        bool keepH = isShift and not na(rngH) and (na(svPH) or rngH > svPH)
+        if not keepH
+            rngH  := na(svPH)  ? hH : svPH
+            rngHt := na(svPHt) ? hT : svPHt
         rngL  := hL
         rngLt := hT
 
+        int cut = math.min(rngHt, rngLt)
         if hideHist
-            int cut = math.min(rngHt, rngLt)
             purgeOlder(dBox, dRef, dDir, dLive, cut)
             purgeOlder(fBox, fRef, fDirB, fLive, cut)
 
@@ -560,7 +587,8 @@ if newBar
             float bot = useWick ? array.get(aL, obP) : math.min(array.get(aO, obP), array.get(aC, obP))
             array.push(obTop, top), array.push(obBot, bot)
             array.push(obTim, array.get(aT, obP))
-            array.push(obDir, -1), array.push(obBrk, false), array.push(obUsd, false)
+            array.push(obDir, -1), array.push(obBrk, false)
+            array.push(obMit, false), array.push(obUsd, false)
             if showOB
                 newZone(dBox, dRef, dDir, dLive, array.get(aT, obP), top, rEdge, bot, -1,
                      array.size(obDir) - 1 + obDrop)
@@ -569,7 +597,8 @@ if newBar
         if showBR and array.size(obDir) > 0
             int bk = -1
             for k = array.size(obDir) - 1 to 0
-                if array.get(obDir, k) == 1 and array.get(obBrk, k) and not array.get(obUsd, k)
+                bool inWin = not hideHist or na(cut) or array.get(obTim, k) >= cut
+                if array.get(obDir, k) == 1 and array.get(obBrk, k) and not array.get(obUsd, k) and inWin
                     bk := k
                     break
             if bk >= 0
@@ -594,16 +623,54 @@ if newBar
     // the drawing caps, so a trimmed entry can never still own a live box.
     while array.size(obDir) > regCap
         array.shift(obTop), array.shift(obBot), array.shift(obTim)
-        array.shift(obDir), array.shift(obBrk), array.shift(obUsd)
+        array.shift(obDir), array.shift(obBrk), array.shift(obMit), array.shift(obUsd)
         obDrop += 1
     while array.size(fDirA) > regCap
         array.shift(fTop), array.shift(fBot), array.shift(fDirA), array.shift(fFill)
         fvDrop += 1
 
 // ═════════════ Right-edge projection, once at the end of the series ═════════════
+// POI names are bar-index labels pinned poiOff candles past the last one, so the
+// offset is a real bar count that a weekend or a session break cannot stretch,
+// and it measures from the right edge rather than from the zone's own origin.
+// Labels are pooled and repositioned rather than recreated.
 if barstate.islast
     refresh(dBox, dDir, dLive, rEdge)
     refresh(fBox, fDirB, fLive, rEdge)
+
+    int lx   = bar_index + poiOff
+    int used = 0
+
+    if labelPOI and array.size(dBox) > 0
+        for k = 0 to array.size(dBox) - 1
+            if array.get(dLive, k)
+                box bx = array.get(dBox, k)
+                int d  = array.get(dDir, k)
+                if array.size(poiLbl) <= used
+                    array.push(poiLbl, label.new(lx, 0.0, "", style = label.style_none, size = size.small))
+                label lb = array.get(poiLbl, used)
+                label.set_xy(lb, lx, (box.get_top(bx) + box.get_bottom(bx)) / 2)
+                label.set_text(lb, htfTag + " " + zName(d))
+                label.set_textcolor(lb, color.new(zCol(d), 15))
+                used += 1
+
+    if labelPOI and array.size(fBox) > 0
+        for k = 0 to array.size(fBox) - 1
+            if array.get(fLive, k)
+                box bx = array.get(fBox, k)
+                int d  = array.get(fDirB, k)
+                if array.size(poiLbl) <= used
+                    array.push(poiLbl, label.new(lx, 0.0, "", style = label.style_none, size = size.small))
+                label lb = array.get(poiLbl, used)
+                label.set_xy(lb, lx, (box.get_top(bx) + box.get_bottom(bx)) / 2)
+                label.set_text(lb, htfTag + " " + zName(d))
+                label.set_textcolor(lb, color.new(zCol(d), 15))
+                used += 1
+
+    // Zones retired since the previous tick leave their label behind.
+    if array.size(poiLbl) > used
+        for k = array.size(poiLbl) - 1 to used
+            label.delete(array.pop(poiLbl))
 
 // ═════════════════════ Dealing range ═════════════════════
 if showRng and not na(rngH) and not na(rngL)
