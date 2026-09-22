@@ -79,7 +79,11 @@ maxLive = input.int(4, "Max POIs per type / side", minval = 1, maxval = 15, grou
 poiMit  = input.string("Close through", "Retire an OB / Breaker on", options = ["Close through", "First touch"], group = gP,
      tooltip = "Close through — the zone survives until an HTF candle CLOSES past its far side, so a wick raid leaves it alive.\n\nFirst touch — the zone is retired as soon as an HTF candle trades into it at all.\n\nPromotion to a breaker always requires a close through, whichever you pick: a close through the block is what makes it a failed one. Fair value gaps keep their own fill rules.")
 
+obSrc   = input.string("Last candle", "Order block candle", options = ["Last candle", "Leg origin"], group = gP,
+     tooltip = "Which opposite-direction candle becomes the order block.\n\nLast candle — the one immediately before the break. That is the final pause before the impulse, so the zone sits close to price and is reachable on a shallow pullback.\n\nLeg origin — the one that reaches deepest into the leg, searched back as far as the swing the leg is built on. That is where the move began, so the zone sits lower, further from price, and survives much longer.")
+
 bool poiTouch = poiMit == "First touch"
+bool obOrigin = obSrc == "Leg origin"
 
 // ═══════════════════════ STRUCTURE ═══════════════════════
 gS = "STRUCTURE"
@@ -87,6 +91,8 @@ showMS = input.bool(true, "Show MSS / MSB", group = gS)
 pvLen  = input.int(2, "Swing lookback (HTF bars)", minval = 1, maxval = 10, group = gS,
      tooltip = "How many HTF bars must sit either side of a candle for it to count as a swing. Higher = fewer, bigger swings.")
 msKeep = input.int(2, "MSS / MSB kept when Hide Historical is on", minval = 1, maxval = 20, group = gS)
+dbgOn  = input.bool(false, "Show diagnostics table", group = gS,
+     tooltip = "Prints what the script actually decided on the last structure break: the leg it searched, how many HTF candles that window held, and which candle it settled on. Use it when a zone lands somewhere you did not expect.")
 
 // ═══════════════════════ STYLE OPTIONS ═══════════════════════
 gY = "STYLE OPTIONS"
@@ -100,14 +106,14 @@ fvBullC  = input.color(#00c08b, "Bullish FVGs",            group = gY, inline = 
 fvBearC  = input.color(#e8455f, "Bearish FVGs",            group = gY, inline = "s4")
 
 lineW    = input.int(1, "Line Thickness (All Lines)", minval = 1, maxval = 5, group = gY, inline = "s5")
-showEmas = input.bool(false, "Display EMAs", group = gY, inline = "s5",
-     tooltip = "Plots the 50 and 200 EMA of the chart timeframe.")
+showEmaF = input.bool(false, "Display EMA 50",  group = gY, inline = "s6")
+showEmaS = input.bool(false, "Display EMA 200", group = gY, inline = "s6",
+     tooltip = "Each average plots independently. Both are taken from the CHART timeframe's close, not the HTF. Lengths and colours sit in the fixed-behaviour block near the top of the script.")
 
 // ═══════ Fixed behaviour — edit here rather than in the settings panel ═══════
 int   rngDim    = 45    // transparency of the dealing-range lines
 bool  useWick   = true  // order block spans the full candle, wick to wick
-int   obLook    = 30    // HTF bars searched back for the order block candle
-int   msLen     = 4     // length of an MSS / MSB marker, in HTF bars
+int   obLook    = 60    // HTF bars searched back for the order block candle
 float fvgMinAtr = 0.0   // minimum gap size in HTF ATR14 multiples (0 = no filter)
 bool  fvgShrink = true  // trim a gap as price fills into it
 bool  fvgByWick = true  // a gap fills on wicks, not closes
@@ -193,6 +199,16 @@ var int   svPHt = na
 var float svPL = na
 var int   svPLt = na
 var int   bias = 0           // +1 bullish, -1 bearish, 0 undetermined
+var int   legT = na          // when the CURRENT bias leg began
+
+// Diagnostics, filled on each break and rendered only when dbgOn
+var string dbgBrk = "—"
+var int    dbgBrkT = na
+var int    dbgWin  = 0
+var int    dbgBack = na
+var float  dbgObHi = na
+var float  dbgObLo = na
+var int    dbgN    = 0
 
 // Live dealing range
 var float rngH  = na
@@ -363,6 +379,7 @@ if newBar
         dropped += 1
 
     int n = array.size(aT)
+    dbgN := n
 
     // ── 1a. Order blocks. A close through the far side marks the block FAILED,
     // which is what makes it breaker material, and is tracked whatever the user
@@ -495,13 +512,22 @@ if newBar
         rngH  := hH
         rngHt := hT
 
+        // rngLt tracks the PROTECTED swing, which on a continuation break moves
+        // up to the newest higher low — far too tight to call a leg. The leg
+        // anchor is set only on a shift, so it stays at the low the whole bull
+        // sequence is built on.
+        if isShift or na(legT)
+            legT := rngLt
+
         int cut = math.min(rngHt, rngLt)
         if hideHist
             purgeOlder(dBox, dRef, dDir, dLive, cut)
             purgeOlder(fBox, fRef, fDirB, fLive, cut)
 
         if showMS
-            line ml = line.new(array.get(aT, math.max(pos(phI), n - 1 - msLen)), phP, hT, phP,
+            // Anchored on the swing candle itself, so the line starts at the
+            // tip of the wick it is breaking and runs across to the break.
+            line ml = line.new(array.get(aT, pos(phI)), phP, hT, phP,
                  xloc = xloc.bar_time, color = pStr, width = lineW)
             label mlb = label.new(hT, phP, isShift ? "MSS" : "MSB", xloc = xloc.bar_time,
                  style = label.style_label_down, color = color.new(color.black, 100),
@@ -514,10 +540,37 @@ if newBar
         // back: a break candle can gap up, sell off and still close through.
         int obP = -1
         if n >= 2
+            int obFloor = math.max(0, n - 1 - obLook)
+            if obOrigin
+                // Deepest down close since legT, the low the whole bull
+                // sequence is built on.
+                float best = na
+                for k = n - 2 to obFloor
+                    if array.get(aT, k) < legT
+                        break
+                    if array.get(aC, k) < array.get(aO, k) and (na(best) or array.get(aL, k) < best)
+                        best := array.get(aL, k)
+                        obP  := k
+            // Last down close — the default rule, and the fallback for a leg
+            // that holds none within its own bounds.
+            if obP < 0
+                for k = n - 2 to obFloor
+                    if array.get(aC, k) < array.get(aO, k)
+                        obP := k
+                        break
+
+        if dbgOn
+            dbgBrk  := isShift ? "MSS bull" : "MSB bull"
+            dbgBrkT := hT
+            dbgBack := obP < 0 ? na : n - 1 - obP
+            dbgObHi := obP < 0 ? na : array.get(aH, obP)
+            dbgObLo := obP < 0 ? na : array.get(aL, obP)
+            int lf = math.max(0, n - 1 - obLook)
             for k = n - 2 to math.max(0, n - 1 - obLook)
-                if array.get(aC, k) < array.get(aO, k)
-                    obP := k
+                if array.get(aT, k) < legT
+                    lf := k + 1
                     break
+            dbgWin := math.max(0, n - 1 - lf)
 
         if obP >= 0
             float top = useWick ? array.get(aH, obP) : math.max(array.get(aO, obP), array.get(aC, obP))
@@ -560,13 +613,16 @@ if newBar
         rngL  := hL
         rngLt := hT
 
+        if isShift or na(legT)
+            legT := rngHt
+
         int cut = math.min(rngHt, rngLt)
         if hideHist
             purgeOlder(dBox, dRef, dDir, dLive, cut)
             purgeOlder(fBox, fRef, fDirB, fLive, cut)
 
         if showMS
-            line ml = line.new(array.get(aT, math.max(pos(plI), n - 1 - msLen)), plP, hT, plP,
+            line ml = line.new(array.get(aT, pos(plI)), plP, hT, plP,
                  xloc = xloc.bar_time, color = pStr, width = lineW)
             label mlb = label.new(hT, plP, isShift ? "MSS" : "MSB", xloc = xloc.bar_time,
                  style = label.style_label_up, color = color.new(color.black, 100),
@@ -577,10 +633,33 @@ if newBar
 
         int obP = -1
         if n >= 2
+            int obFloor = math.max(0, n - 1 - obLook)
+            if obOrigin
+                float best = na
+                for k = n - 2 to obFloor
+                    if array.get(aT, k) < legT
+                        break
+                    if array.get(aC, k) > array.get(aO, k) and (na(best) or array.get(aH, k) > best)
+                        best := array.get(aH, k)
+                        obP  := k
+            if obP < 0
+                for k = n - 2 to obFloor
+                    if array.get(aC, k) > array.get(aO, k)
+                        obP := k
+                        break
+
+        if dbgOn
+            dbgBrk  := isShift ? "MSS bear" : "MSB bear"
+            dbgBrkT := hT
+            dbgBack := obP < 0 ? na : n - 1 - obP
+            dbgObHi := obP < 0 ? na : array.get(aH, obP)
+            dbgObLo := obP < 0 ? na : array.get(aL, obP)
+            int lf = math.max(0, n - 1 - obLook)
             for k = n - 2 to math.max(0, n - 1 - obLook)
-                if array.get(aC, k) > array.get(aO, k)
-                    obP := k
+                if array.get(aT, k) < legT
+                    lf := k + 1
                     break
+            dbgWin := math.max(0, n - 1 - lf)
 
         if obP >= 0
             float top = useWick ? array.get(aH, obP) : math.max(array.get(aO, obP), array.get(aC, obP))
@@ -697,10 +776,35 @@ if showRng and not na(rngH) and not na(rngL)
 float emaF = ta.ema(close, emaLenF)
 float emaS = ta.ema(close, emaLenS)
 
-plot(showEmas ? emaF : na, "EMA 50",  color = emaColF, linewidth = 1,
+plot(showEmaF ? emaF : na, "EMA 50",  color = emaColF, linewidth = 1,
      style = plot.style_line, display = display.all - display.price_scale)
-plot(showEmas ? emaS : na, "EMA 200", color = emaColS, linewidth = 1,
+plot(showEmaS ? emaS : na, "EMA 200", color = emaColS, linewidth = 1,
      style = plot.style_line, display = display.all - display.price_scale)
+
+// ═════════════════════ Diagnostics ═════════════════════
+// What the script actually decided on the last break, so a zone that lands
+// somewhere unexpected can be read off the chart instead of guessed at.
+fmtT(int t)   => na(t) ? "—" : str.format_time(t, "yyyy-MM-dd HH:mm", syminfo.timezone)
+fmtP(float v) => na(v) ? "—" : str.tostring(v, format.mintick)
+
+dbgRow(table tb, int r, string k, string v) =>
+    table.cell(tb, 0, r, k, text_color = color.new(#8b95a5, 0), text_size = size.small, text_halign = text.align_left)
+    table.cell(tb, 1, r, v, text_color = color.new(#e6edf5, 0), text_size = size.small, text_halign = text.align_right)
+
+var table dbg = na
+if dbgOn and barstate.islast
+    if na(dbg)
+        dbg := table.new(position.top_right, 2, 9, bgcolor = color.new(#0b1120, 12),
+             border_color = color.new(#8b95a5, 70), border_width = 1, frame_width = 0)
+    dbgRow(dbg, 0, "Shadow Trades", htfTag + "  ·  " + str.tostring(dbgN) + " HTF bars")
+    dbgRow(dbg, 1, "OB rule",       obSrc)
+    dbgRow(dbg, 2, "Retire on",     poiMit)
+    dbgRow(dbg, 3, "Last break",    dbgBrk + "   " + fmtT(dbgBrkT))
+    dbgRow(dbg, 4, "Leg anchored",  fmtT(legT))
+    dbgRow(dbg, 5, "Search window", str.tostring(dbgWin) + " HTF bars")
+    dbgRow(dbg, 6, "OB candle",     na(dbgBack) ? "none" : str.tostring(dbgBack) + " back from break")
+    dbgRow(dbg, 7, "OB range",      fmtP(dbgObLo) + "  –  " + fmtP(dbgObHi))
+    dbgRow(dbg, 8, "Dealing range", fmtP(rngL) + "  –  " + fmtP(rngH))
 
 // ═════════════════════ Alerts ═════════════════════
 alertcondition(bullSig, "HTF Bullish Structure (MSB / MSS)", "Bullish market structure break or shift on the HTF")

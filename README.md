@@ -43,15 +43,40 @@ it. A break that agrees with the current bias prints **MSB**; one that reverses
 it prints **MSS**. The very first break on a chart has no prior bias to continue,
 so it establishes one and prints **MSS**.
 
+The marker is drawn at the broken swing's own price — the high of a pivot-high
+candle, the low of a pivot-low candle — and anchored on that candle, so the line
+starts at the tip of the wick being broken and runs across to the candle that
+closed through it.
+
 Because a pivot is only valid when no neighbouring candle exceeded it, a break
 can never be "missed" during the confirmation window — the first close through
 the level always happens after the pivot is armed.
 
 ### Order blocks and breakers
 
-On a bullish break, the script walks back from the candle *before* the break
-looking for the most recent down-close candle; that candle becomes the bullish
-order block (wick to wick by default). The mirror applies to bearish breaks.
+Which candle becomes the order block is set by *Order block candle*:
+
+- **Last candle** (default) — the most recent down-close candle before the
+  break. That is the final pause before the impulse, so the zone sits close to
+  price and is reachable on a shallow pullback.
+- **Leg origin** — the down-close candle that reaches *deepest* into the leg,
+  searched back as far as the swing the leg is built on. That is where the move
+  began, so the zone sits lower, further from price, and survives much longer.
+
+Either way the zone spans the candle wick to wick by default, and the mirror
+applies to bearish breaks.
+
+`Leg origin` searches back to the **leg anchor** — the swing the current bias
+sequence is built on, set when the bias last *shifted* and held through every
+continuation break after it. It is deliberately not the protected swing, which
+ratchets up to each new higher low and would collapse the search to a candle or
+two in a running trend.
+
+Note that `Swing lookback` has little influence on either rule. The search is
+anchored to the **break candle**, not to the pivot, so when one impulse candle
+clears both a tight and a wide swing high the break lands on the same candle at
+every lookback. The lookback changes which level is marked broken and how often
+breaks fire — not, in most cases, where the block lands.
 
 An order block is **retired** on whichever event *Retire an OB / Breaker on*
 names: an HTF candle **closing through** its far side (the default — a wick raid
@@ -129,6 +154,9 @@ Three slots, each assignable to `Order Blocks`, `Breakers`, `Fair Value Gaps` or
 `None`, with a per-slot **Extend** toggle (run to the right edge, or stop at the
 current bar). `Max POIs per type / side` caps how many of each kind are kept.
 
+`Order block candle` chooses between `Last candle` (default) and `Leg origin`,
+described under **Order blocks and breakers** above.
+
 `Retire an OB / Breaker on` chooses between `Close through` (default) and
 `First touch`. Fair value gaps are unaffected — they keep their own fill model,
 set by `fvgByWick` and `fvgShrink` in the constants block.
@@ -141,13 +169,17 @@ are derived from them.
 | Setting | Default | Notes |
 | --- | --- | --- |
 | Show MSS / MSB | on | |
+| Show diagnostics table | off | Prints what the last break actually decided: leg anchor, search window size, which candle was chosen. |
 | Swing lookback (HTF bars) | 2 | Candles required either side of a swing. Higher = fewer, larger swings. |
 | MSS / MSB kept when Hide Historical is on | 2 | |
 
 ### Style
 
 Per-object colours for range lines, order blocks, breakers and FVGs, plus line
-thickness and an optional 50/200 EMA pair (chart timeframe).
+thickness and the two EMAs. `Display EMA 50` and `Display EMA 200` toggle
+independently, so either can be shown on its own; both read the chart
+timeframe's close, not the HTF. Their lengths and colours are constants
+(`emaLenF` / `emaLenS`, `emaColF` / `emaColS`).
 
 ### Fixed behaviour
 
@@ -158,8 +190,7 @@ settings panel:
 | --- | --- | --- |
 | `rngDim` | 45 | Transparency of the dealing-range lines. |
 | `useWick` | `true` | Order block spans the full candle, wick to wick. |
-| `obLook` | 30 | HTF bars searched back for the order block candle. |
-| `msLen` | 4 | Length of an MSS / MSB marker, in HTF bars. |
+| `obLook` | 60 | HTF bars searched back for the order block candle. |
 | `fvgMinAtr` | 0.0 | Minimum gap size in HTF ATR14 multiples (0 = no filter). |
 | `fvgShrink` | `true` | Trim a gap as price fills into it. |
 | `fvgByWick` | `true` | A gap fills on wicks rather than closes. |
@@ -265,6 +296,31 @@ rolls over.
     from a leg the user had told the script to forget could still be promoted
     into view as a breaker. Promotion is now gated on the block sitting inside
     the current range window.
+
+### Round 3 — order block placement
+
+14. **The order block candle is now selectable.** The one rule on offer was
+    "last opposite-close candle before the break", which anchors the zone near
+    the impulse rather than at its origin. `Leg origin` picks the candle that
+    reaches deepest into the leg instead, bounded by the swing the leg is built
+    on (`rngLt` / `rngHt`, already computed at that point). It falls back to the
+    last-candle rule when a leg contains no opposite close inside its own
+    bounds, so the option can never leave a break without a block.
+
+### Round 4 — the leg anchor
+
+15. **`Leg origin` searched the wrong window.** It was bounded by `rngLt`, the
+    protected swing — but on a *continuation* break that is reassigned to the
+    newest confirmed higher low, so in a running trend the window collapsed to a
+    candle or two and the rule re-picked exactly what `Last candle` picks. The
+    bound is now a separate leg anchor, set only when the bias shifts and held
+    across every continuation after it. `obLook` also went 30 → 60 HTF bars, so
+    a long leg is not clipped before its origin is reached.
+
+16. **Added a diagnostics table.** Two rounds were spent guessing at which
+    candle the script chose and why. It now reports that directly: leg anchor,
+    search window in HTF bars, how far back the chosen candle sits from the
+    break, and its range. Off by default.
 
 ### Behaviour worth knowing
 
