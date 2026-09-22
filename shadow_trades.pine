@@ -106,8 +106,9 @@ fvBullC  = input.color(#00c08b, "Bullish FVGs",            group = gY, inline = 
 fvBearC  = input.color(#e8455f, "Bearish FVGs",            group = gY, inline = "s4")
 
 lineW    = input.int(1, "Line Thickness (All Lines)", minval = 1, maxval = 5, group = gY, inline = "s5")
-showEmas = input.bool(false, "Display EMAs", group = gY, inline = "s5",
-     tooltip = "Plots the 50 and 200 EMA of the chart timeframe.")
+showEmaF = input.bool(false, "Display EMA 50",  group = gY, inline = "s6")
+showEmaS = input.bool(false, "Display EMA 200", group = gY, inline = "s6",
+     tooltip = "Each average plots independently. Both are taken from the CHART timeframe's close, not the HTF. Lengths and colours sit in the fixed-behaviour block near the top of the script.")
 
 // ═══════ Fixed behaviour — edit here rather than in the settings panel ═══════
 int   rngDim    = 45    // transparency of the dealing-range lines
@@ -775,9 +776,9 @@ if showRng and not na(rngH) and not na(rngL)
 float emaF = ta.ema(close, emaLenF)
 float emaS = ta.ema(close, emaLenS)
 
-plot(showEmas ? emaF : na, "EMA 50",  color = emaColF, linewidth = 1,
+plot(showEmaF ? emaF : na, "EMA 50",  color = emaColF, linewidth = 1,
      style = plot.style_line, display = display.all - display.price_scale)
-plot(showEmas ? emaS : na, "EMA 200", color = emaColS, linewidth = 1,
+plot(showEmaS ? emaS : na, "EMA 200", color = emaColS, linewidth = 1,
      style = plot.style_line, display = display.all - display.price_scale)
 
 // ═════════════════════ Diagnostics ═════════════════════

@@ -176,7 +176,10 @@ are derived from them.
 ### Style
 
 Per-object colours for range lines, order blocks, breakers and FVGs, plus line
-thickness and an optional 50/200 EMA pair (chart timeframe).
+thickness and the two EMAs. `Display EMA 50` and `Display EMA 200` toggle
+independently, so either can be shown on its own; both read the chart
+timeframe's close, not the HTF. Their lengths and colours are constants
+(`emaLenF` / `emaLenS`, `emaColF` / `emaColS`).
 
 ### Fixed behaviour
 
