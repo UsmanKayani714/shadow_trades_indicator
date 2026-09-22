@@ -61,11 +61,17 @@ Which candle becomes the order block is set by *Order block candle*:
 Either way the zone spans the candle wick to wick by default, and the mirror
 applies to bearish breaks.
 
-Note that `Swing lookback` has little influence here. The search is anchored to
-the **break candle**, not to the pivot, so when one impulse candle clears both a
-tight and a wide swing high the break lands on the same candle at every lookback
-and the block does not move. The lookback changes which level is marked broken
-and how often breaks fire — not, in most cases, where the block lands.
+`Leg origin` searches back to the **leg anchor** — the swing the current bias
+sequence is built on, set when the bias last *shifted* and held through every
+continuation break after it. It is deliberately not the protected swing, which
+ratchets up to each new higher low and would collapse the search to a candle or
+two in a running trend.
+
+Note that `Swing lookback` has little influence on either rule. The search is
+anchored to the **break candle**, not to the pivot, so when one impulse candle
+clears both a tight and a wide swing high the break lands on the same candle at
+every lookback. The lookback changes which level is marked broken and how often
+breaks fire — not, in most cases, where the block lands.
 
 An order block is **retired** on whichever event *Retire an OB / Breaker on*
 names: an HTF candle **closing through** its far side (the default — a wick raid
@@ -158,6 +164,7 @@ are derived from them.
 | Setting | Default | Notes |
 | --- | --- | --- |
 | Show MSS / MSB | on | |
+| Show diagnostics table | off | Prints what the last break actually decided: leg anchor, search window size, which candle was chosen. |
 | Swing lookback (HTF bars) | 2 | Candles required either side of a swing. Higher = fewer, larger swings. |
 | MSS / MSB kept when Hide Historical is on | 2 | |
 
@@ -175,7 +182,7 @@ settings panel:
 | --- | --- | --- |
 | `rngDim` | 45 | Transparency of the dealing-range lines. |
 | `useWick` | `true` | Order block spans the full candle, wick to wick. |
-| `obLook` | 30 | HTF bars searched back for the order block candle. |
+| `obLook` | 60 | HTF bars searched back for the order block candle. |
 | `msLen` | 4 | Length of an MSS / MSB marker, in HTF bars. |
 | `fvgMinAtr` | 0.0 | Minimum gap size in HTF ATR14 multiples (0 = no filter). |
 | `fvgShrink` | `true` | Trim a gap as price fills into it. |
@@ -292,6 +299,21 @@ rolls over.
     on (`rngLt` / `rngHt`, already computed at that point). It falls back to the
     last-candle rule when a leg contains no opposite close inside its own
     bounds, so the option can never leave a break without a block.
+
+### Round 4 — the leg anchor
+
+15. **`Leg origin` searched the wrong window.** It was bounded by `rngLt`, the
+    protected swing — but on a *continuation* break that is reassigned to the
+    newest confirmed higher low, so in a running trend the window collapsed to a
+    candle or two and the rule re-picked exactly what `Last candle` picks. The
+    bound is now a separate leg anchor, set only when the bias shifts and held
+    across every continuation after it. `obLook` also went 30 → 60 HTF bars, so
+    a long leg is not clipped before its origin is reached.
+
+16. **Added a diagnostics table.** Two rounds were spent guessing at which
+    candle the script chose and why. It now reports that directly: leg anchor,
+    search window in HTF bars, how far back the chosen candle sits from the
+    break, and its range. Off by default.
 
 ### Behaviour worth knowing
 
