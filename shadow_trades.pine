@@ -79,7 +79,11 @@ maxLive = input.int(4, "Max POIs per type / side", minval = 1, maxval = 15, grou
 poiMit  = input.string("Close through", "Retire an OB / Breaker on", options = ["Close through", "First touch"], group = gP,
      tooltip = "Close through — the zone survives until an HTF candle CLOSES past its far side, so a wick raid leaves it alive.\n\nFirst touch — the zone is retired as soon as an HTF candle trades into it at all.\n\nPromotion to a breaker always requires a close through, whichever you pick: a close through the block is what makes it a failed one. Fair value gaps keep their own fill rules.")
 
+obSrc   = input.string("Last candle", "Order block candle", options = ["Last candle", "Leg origin"], group = gP,
+     tooltip = "Which opposite-direction candle becomes the order block.\n\nLast candle — the one immediately before the break. That is the final pause before the impulse, so the zone sits close to price and is reachable on a shallow pullback.\n\nLeg origin — the one that reaches deepest into the leg, searched back as far as the swing the leg is built on. That is where the move began, so the zone sits lower, further from price, and survives much longer.")
+
 bool poiTouch = poiMit == "First touch"
+bool obOrigin = obSrc == "Leg origin"
 
 // ═══════════════════════ STRUCTURE ═══════════════════════
 gS = "STRUCTURE"
@@ -514,10 +518,24 @@ if newBar
         // back: a break candle can gap up, sell off and still close through.
         int obP = -1
         if n >= 2
-            for k = n - 2 to math.max(0, n - 1 - obLook)
-                if array.get(aC, k) < array.get(aO, k)
-                    obP := k
-                    break
+            int obFloor = math.max(0, n - 1 - obLook)
+            if obOrigin
+                // Deepest down close in the leg. rngLt is the swing this leg is
+                // built on and was set above, so it bounds the search naturally.
+                float best = na
+                for k = n - 2 to obFloor
+                    if array.get(aT, k) < rngLt
+                        break
+                    if array.get(aC, k) < array.get(aO, k) and (na(best) or array.get(aL, k) < best)
+                        best := array.get(aL, k)
+                        obP  := k
+            // Last down close — the default rule, and the fallback for a leg
+            // that holds none within its own bounds.
+            if obP < 0
+                for k = n - 2 to obFloor
+                    if array.get(aC, k) < array.get(aO, k)
+                        obP := k
+                        break
 
         if obP >= 0
             float top = useWick ? array.get(aH, obP) : math.max(array.get(aO, obP), array.get(aC, obP))
@@ -577,10 +595,20 @@ if newBar
 
         int obP = -1
         if n >= 2
-            for k = n - 2 to math.max(0, n - 1 - obLook)
-                if array.get(aC, k) > array.get(aO, k)
-                    obP := k
-                    break
+            int obFloor = math.max(0, n - 1 - obLook)
+            if obOrigin
+                float best = na
+                for k = n - 2 to obFloor
+                    if array.get(aT, k) < rngHt
+                        break
+                    if array.get(aC, k) > array.get(aO, k) and (na(best) or array.get(aH, k) > best)
+                        best := array.get(aH, k)
+                        obP  := k
+            if obP < 0
+                for k = n - 2 to obFloor
+                    if array.get(aC, k) > array.get(aO, k)
+                        obP := k
+                        break
 
         if obP >= 0
             float top = useWick ? array.get(aH, obP) : math.max(array.get(aO, obP), array.get(aC, obP))

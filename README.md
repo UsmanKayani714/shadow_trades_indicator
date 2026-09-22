@@ -49,9 +49,23 @@ the level always happens after the pivot is armed.
 
 ### Order blocks and breakers
 
-On a bullish break, the script walks back from the candle *before* the break
-looking for the most recent down-close candle; that candle becomes the bullish
-order block (wick to wick by default). The mirror applies to bearish breaks.
+Which candle becomes the order block is set by *Order block candle*:
+
+- **Last candle** (default) — the most recent down-close candle before the
+  break. That is the final pause before the impulse, so the zone sits close to
+  price and is reachable on a shallow pullback.
+- **Leg origin** — the down-close candle that reaches *deepest* into the leg,
+  searched back as far as the swing the leg is built on. That is where the move
+  began, so the zone sits lower, further from price, and survives much longer.
+
+Either way the zone spans the candle wick to wick by default, and the mirror
+applies to bearish breaks.
+
+Note that `Swing lookback` has little influence here. The search is anchored to
+the **break candle**, not to the pivot, so when one impulse candle clears both a
+tight and a wide swing high the break lands on the same candle at every lookback
+and the block does not move. The lookback changes which level is marked broken
+and how often breaks fire — not, in most cases, where the block lands.
 
 An order block is **retired** on whichever event *Retire an OB / Breaker on*
 names: an HTF candle **closing through** its far side (the default — a wick raid
@@ -128,6 +142,9 @@ rather than quietly serving you lookahead bias.
 Three slots, each assignable to `Order Blocks`, `Breakers`, `Fair Value Gaps` or
 `None`, with a per-slot **Extend** toggle (run to the right edge, or stop at the
 current bar). `Max POIs per type / side` caps how many of each kind are kept.
+
+`Order block candle` chooses between `Last candle` (default) and `Leg origin`,
+described under **Order blocks and breakers** above.
 
 `Retire an OB / Breaker on` chooses between `Close through` (default) and
 `First touch`. Fair value gaps are unaffected — they keep their own fill model,
@@ -265,6 +282,16 @@ rolls over.
     from a leg the user had told the script to forget could still be promoted
     into view as a breaker. Promotion is now gated on the block sitting inside
     the current range window.
+
+### Round 3 — order block placement
+
+14. **The order block candle is now selectable.** The one rule on offer was
+    "last opposite-close candle before the break", which anchors the zone near
+    the impulse rather than at its origin. `Leg origin` picks the candle that
+    reaches deepest into the leg instead, bounded by the swing the leg is built
+    on (`rngLt` / `rngHt`, already computed at that point). It falls back to the
+    last-candle rule when a leg contains no opposite close inside its own
+    bounds, so the option can never leave a break without a block.
 
 ### Behaviour worth knowing
 
